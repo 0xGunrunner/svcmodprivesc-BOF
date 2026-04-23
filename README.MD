@@ -332,3 +332,11 @@ This tool is intended for EDUCATIONAL and AUTHORIZED TESTING purposes only.
 
 - Responsibility: The user assumes full responsibility for compliance with all applicable laws and regulations in their jurisdiction.
 By using this code, you agree to use it responsibly and ethically.
+
+DEMO:
+
+![](0.png)
+
+![](1.png)
+
+![](2.png)

@@ -321,3 +321,14 @@ cleanup:
     return 0;
 }
 ```
+
+### ⚠️ Disclaimer / Legal Warning
+
+This tool is intended for EDUCATIONAL and AUTHORIZED TESTING purposes only.
+
+- Authorization Required: Do not use this tool on systems you do not own or do not have explicit written permission to test. Unauthorized access to computer systems is a criminal offense in most jurisdictions.
+
+- No Warranty: This software is provided "as is", without warranty of any kind, express or implied. The author is not liable for any damages or legal consequences arising from the use or misuse of this software.
+
+- Responsibility: The user assumes full responsibility for compliance with all applicable laws and regulations in their jurisdiction.
+By using this code, you agree to use it responsibly and ethically.
